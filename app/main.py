@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings, get_settings
 from app.models import (
@@ -21,6 +24,8 @@ from app.pipeline import MatchingPipeline
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
 app = FastAPI(
     title="Semantic Clinical Matching",
     description=(
@@ -29,6 +34,9 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+# Mount static files (CSS, JS)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # --- Application State ---
 
@@ -51,6 +59,12 @@ def _get_pipeline() -> MatchingPipeline:
 
 
 # --- Endpoints ---
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Serve the web UI."""
+    return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 @app.get("/health", response_model=HealthResponse)

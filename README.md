@@ -26,7 +26,7 @@ A two-stage NLP pipeline that matches medical professionals to clinical job post
           │ Retriever │  │  (Ollama)   │
           └─────┬─────┘  └──────┬──────┘
                 │               │
-       ┌────────▼────┐   ┌─────▼──────┐
+       ┌────────▼────┐   ┌──────▼─────┐
        │  nomic-     │   │   llama3   │
        │  embed-text │   │  (strict   │
        │  embeddings │   │  recruiter │
@@ -47,6 +47,7 @@ A two-stage NLP pipeline that matches medical professionals to clinical job post
 | Component | Technology |
 |-----------|-----------|
 | Language | Python 3.11+ |
+| Frontend | Vanilla HTML / CSS / JS (dark glassmorphism theme) |
 | API Framework | FastAPI + Uvicorn |
 | Embeddings | LlamaIndex + Ollama (`nomic-embed-text`) |
 | Vector Search | FAISS (CPU) |
@@ -121,7 +122,7 @@ This will:
 uv run uvicorn app.main:app --reload
 ```
 
-The API is available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+Open **http://localhost:8000** for the web UI. API docs at **http://localhost:8000/docs**.
 
 ---
 
@@ -197,7 +198,7 @@ semantic-clinical-matching/
 ├── app/
 │   ├── __init__.py
 │   ├── config.py                  # Settings via pydantic-settings (SCM_ env prefix)
-│   ├── main.py                    # FastAPI application and endpoints
+│   ├── main.py                    # FastAPI app, endpoints, static file serving
 │   ├── models.py                  # Pydantic request/response schemas
 │   ├── pipeline.py                # Two-stage orchestrator
 │   ├── ingestion/
@@ -207,6 +208,10 @@ semantic-clinical-matching/
 │   └── reranker/
 │       ├── llm_reranker.py        # LLM-based candidate evaluation
 │       └── prompts.py             # Medical recruiter system prompt
+├── static/
+│   ├── index.html                 # Web UI — single-page app
+│   ├── style.css                  # Dark healthcare theme (glassmorphism)
+│   └── app.js                     # Frontend logic (API calls, rendering)
 ├── scripts/
 │   └── prepare_data.py            # Dataset extraction and cleaning pipeline
 ├── tests/
@@ -284,6 +289,22 @@ Each candidate gets a structured evaluation:
 - `missing_criteria`: required items the candidate lacks
 - `reasoning`: one-paragraph explanation
 - `rank`: integer rank for PASS candidates (1 = best), `null` for FAIL
+
+---
+
+## Web UI
+
+The built-in web interface is served at the root URL (`/`) and provides:
+
+- **Dark-mode healthcare theme** — glassmorphism cards with teal/blue gradient accents
+- **Split-panel layout** — job posting input (left) and results (right)
+- **Stage tabs** — toggle between Stage 2 ranked candidates and Stage 1 retrieval scores
+- **Candidate cards** — PASS/FAIL badges, skill overlap chips, missing criteria, expandable reasoning
+- **Pipeline stats** — retrieved / passed / failed counts at a glance
+- **Sample jobs** — pre-built ICU Nurse, Cardiologist, Pharmacist, and Physiotherapist postings
+- **Keyboard shortcut** — `Ctrl+Enter` to submit
+
+No build step required — plain HTML, CSS, and JS served directly by FastAPI.
 
 ---
 

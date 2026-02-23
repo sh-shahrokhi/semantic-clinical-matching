@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Semantic Clinical Matching</title>
+  <meta name="description"
+    content="AI-powered two-stage pipeline for matching medical professionals to clinical job postings">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🏥</text></svg>">
+</head>
+
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header__icon">🏥</div>
+    <h1 class="header__title">Semantic Clinical Matching</h1>
+    <p class="header__subtitle">Two-stage AI pipeline for matching clinicians to job postings</p>
+  </header>
+
+  <!-- Main App -->
+  <main class="app">
+
+    <!-- Left Panel — Input -->
+    <section class="panel input-panel">
+      <h2 class="panel__title">Job Posting</h2>
+
+      <textarea id="jobText" class="job-textarea"
+        placeholder="Paste a clinical job posting here…&#10;&#10;Example:&#10;Title: ICU Registered Nurse&#10;Location: Calgary, Alberta&#10;Requirements:&#10;- Active CARNA registration&#10;- Minimum 2 years ICU experience&#10;- BLS and ACLS certification required"
+        spellcheck="false"></textarea>
+
+      <div class="controls">
+        <div class="controls__field">
+          <label for="topK">Top-K</label>
+          <input type="number" id="topK" class="top-k-input" value="5" min="1" max="50">
+        </div>
+        <button id="ingestBtn" class="btn btn--secondary" onclick="runIngest()">
+          📥 Ingest Resumes
+        </button>
+        <button id="matchBtn" class="btn btn--primary" onclick="runMatch()">
+          ✨ Match Candidates
+        </button>
+        <button class="btn btn--secondary" onclick="clearAll()">Clear</button>
+      </div>
+
+      <!-- Status -->
+      <div id="statusBar" class="status-bar" style="display: none;">
+        <span class="status-bar__dot"></span>
+        <span id="statusText">Ready</span>
+      </div>
+
+      <!-- Sample jobs -->
+      <div class="samples">
+        <div class="samples__label">Quick samples</div>
+        <div class="samples__list">
+          <button class="sample-btn" onclick="loadSample('icu')">ICU Nurse — Calgary</button>
+          <button class="sample-btn" onclick="loadSample('cardiologist')">Cardiologist — Toronto</button>
+          <button class="sample-btn" onclick="loadSample('pharmacist')">Clinical Pharmacist — Vancouver</button>
+          <button class="sample-btn" onclick="loadSample('physio')">Physiotherapist — Ottawa</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Panel — Results -->
+    <section class="panel results-panel">
+      <h2 class="panel__title">Matching Results</h2>
+
+      <!-- Stage tabs -->
+      <div id="stageTabs" class="stage-tabs" style="display: none;">
+        <button class="stage-tab stage-tab--active" onclick="showTab('ranked')" id="tabRanked">
+          Stage 2 — Ranked Candidates
+        </button>
+        <button class="stage-tab" onclick="showTab('retrieval')" id="tabRetrieval">
+          Stage 1 — Retrieval
+        </button>
+      </div>
+
+      <!-- Stats -->
+      <div id="pipelineStats" class="pipeline-stats" style="display: none;">
+        <div class="stat-card">
+          <div class="stat-card__value" id="statRetrieved">0</div>
+          <div class="stat-card__label">Retrieved</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__value" id="statPassed">0</div>
+          <div class="stat-card__label">Passed</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__value" id="statFailed">0</div>
+          <div class="stat-card__label">Failed</div>
+        </div>
+      </div>
+
+      <!-- Results content -->
+      <div id="resultsContent">
+        <div class="results-empty">
+          <div class="results-empty__icon">🔍</div>
+          <div class="results-empty__text">
+            Paste a job posting and click <strong>Match Candidates</strong> to find the best clinical matches.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Semantic Clinical Matching v0.1.0 &middot;
+    FAISS + LlamaIndex + Ollama &middot;
+    <a href="/docs" target="_blank">API Docs</a>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>
