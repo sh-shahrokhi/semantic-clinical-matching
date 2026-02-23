@@ -1,0 +1,31 @@
+[project]
+name = "semantic-clinical-matching"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "faiss-cpu>=1.13.2",
+    "fastapi>=0.131.0",
+    "llama-index>=0.14.15",
+    "llama-index-llms-ollama>=0.6.0",
+    "llama-index-embeddings-ollama>=0.5.0",
+    "pydantic-settings>=2.0.0",
+    "uvicorn>=0.41.0",
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.11.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
