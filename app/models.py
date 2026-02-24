@@ -12,6 +12,13 @@ class MatchRequest(BaseModel):
 
     job_text: str = Field(..., description="Full text of the job posting to match against")
     top_k: int | None = Field(None, description="Number of candidates for Stage 1 retrieval")
+    llm_model: str | None = Field(
+        None,
+        description=(
+            "Ollama LLM model to use for Stage 2 reranking. "
+            "Uses configured default if omitted."
+        ),
+    )
 
 
 class IngestRequest(BaseModel):
@@ -64,3 +71,10 @@ class HealthResponse(BaseModel):
 
     status: str
     version: str
+
+
+class ModelsResponse(BaseModel):
+    """Response body for the /models endpoint."""
+
+    models: list[str]
+    default_model: str

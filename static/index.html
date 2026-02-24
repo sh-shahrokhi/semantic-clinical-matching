@@ -37,6 +37,12 @@
           <label for="topK">Top-K</label>
           <input type="number" id="topK" class="top-k-input" value="5" min="1" max="50">
         </div>
+        <div class="controls__field controls__field--model">
+          <label for="llmModel">Model</label>
+          <select id="llmModel" class="model-select" aria-label="Select LLM model">
+            <option value="">Loading…</option>
+          </select>
+        </div>
         <button id="ingestBtn" class="btn btn--secondary" onclick="runIngest()">
           📥 Ingest Resumes
         </button>

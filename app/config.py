@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # LLM settings
     llm_request_timeout: float = 120.0
+    llm_max_concurrency: int = 3
 
     model_config = {"env_prefix": "SCM_"}
 

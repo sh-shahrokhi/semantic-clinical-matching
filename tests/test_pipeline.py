@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -11,6 +12,16 @@ from app.pipeline import MatchingPipeline
 
 
 class TestMatchingPipeline:
+    def _make_single_response(self, resume_id, status="PASS"):
+        """Helper to create a mock single-candidate LLM response."""
+        return MagicMock(
+            text=(
+                f'{{"resume_id":"{resume_id}","status":"{status}",'
+                f'"skill_overlaps":["ICU experience"],"missing_criteria":[],'
+                f'"reasoning":"Evaluated."}}'
+            )
+        )
+
     def test_ingest_and_match(
         self, test_settings, sample_resume_text,
         sample_resume_text_2, sample_job_text,
@@ -28,15 +39,6 @@ class TestMatchingPipeline:
         ]
         query_embedding = np.random.default_rng(42).random(768).tolist()
 
-        llm_response_json = """[
-          {"resume_id": "resume_001", "rank": 1, "status": "PASS",
-           "skill_overlaps": ["ICU experience"], "missing_criteria": [],
-           "reasoning": "Strong match."},
-          {"resume_id": "resume_002", "rank": null, "status": "FAIL",
-           "skill_overlaps": [], "missing_criteria": ["CARNA registration"],
-           "reasoning": "Wrong specialty and province."}
-        ]"""
-
         pipeline = MatchingPipeline(test_settings)
 
         # Replace Pydantic models with plain mocks
@@ -46,15 +48,24 @@ class TestMatchingPipeline:
         pipeline.retriever.embed_model = mock_embed
 
         mock_llm = MagicMock()
-        mock_llm.complete.return_value = MagicMock(
-            text=llm_response_json,
-        )
+        # Per-candidate eval (2 calls) + ranking call (1 call)
+        mock_llm.complete.side_effect = [
+            self._make_single_response("resume_001", "PASS"),
+            MagicMock(
+                text=(
+                    '{"resume_id":"resume_002","status":"FAIL",'
+                    '"skill_overlaps":[],"missing_criteria":["CARNA registration"],'
+                    '"reasoning":"Wrong specialty and province."}'
+                )
+            ),
+            # No ranking call needed since only 1 PASS
+        ]
         pipeline.reranker.llm = mock_llm
 
         count = pipeline.ingest_resumes()
         assert count == 2
 
-        result = pipeline.match(sample_job_text, top_k=2)
+        result = asyncio.run(pipeline.match(sample_job_text, top_k=2))
 
         assert len(result.retrieval_results) == 2
         assert len(result.ranked_candidates) == 2
@@ -67,4 +78,4 @@ class TestMatchingPipeline:
         """Test that matching without an index raises RuntimeError."""
         pipeline = MatchingPipeline(test_settings)
         with pytest.raises(RuntimeError, match="No FAISS index available"):
-            pipeline.match(sample_job_text)
+            asyncio.run(pipeline.match(sample_job_text))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -42,6 +43,7 @@ class MatchingPipeline:
             llm_model=settings.llm_model,
             ollama_base_url=settings.ollama_base_url,
             request_timeout=settings.llm_request_timeout,
+            max_concurrency=settings.llm_max_concurrency,
         )
         self._index_built = False
 
@@ -74,12 +76,15 @@ class MatchingPipeline:
         self._index_built = True
         logger.info("FAISS index loaded from %s", self.settings.faiss_index_path)
 
-    def match(self, job_text: str, top_k: int | None = None) -> PipelineResult:
+    async def match(
+        self, job_text: str, top_k: int | None = None, llm_model: str | None = None
+    ) -> PipelineResult:
         """Run the full two-stage matching pipeline.
 
         Args:
             job_text: Job posting text to match against.
             top_k: Number of candidates to retrieve in Stage 1. Defaults to settings value.
+            llm_model: Optional model override for Stage 2 reranking.
 
         Returns:
             PipelineResult with retrieval and ranking results.
@@ -108,7 +113,7 @@ class MatchingPipeline:
             {"resume_id": r.resume_id, "text": r.text} for r in retrieval_results
         ]
         logger.info("Stage 2: Sending %d candidates to LLM for reranking", len(candidates))
-        ranked = self.reranker.rerank(job_text, candidates)
+        ranked = await self.reranker.rerank(job_text, candidates, llm_model=llm_model)
         logger.info("Stage 2 complete: %d candidates evaluated", len(ranked))
 
         return PipelineResult(

@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import MagicMock
+
 import pytest
 
-from app.reranker.llm_reranker import LLMReranker, RankedCandidate
-from app.reranker.prompts import build_reranker_prompt
+from app.reranker.llm_reranker import (
+    LLMReranker,
+    LLMResponseError,
+    RankedCandidate,
+)
+from app.reranker.prompts import build_reranker_prompt, build_single_candidate_prompt
 
 
 class TestPrompts:
@@ -30,6 +37,15 @@ class TestPrompts:
         ]
         prompt = build_reranker_prompt(sample_job_text, candidates)
         assert "---" in prompt
+
+    def test_build_single_candidate_prompt(self, sample_job_text):
+        """Test single candidate prompt includes all fields."""
+        prompt = build_single_candidate_prompt(
+            sample_job_text, "resume_001", "Some resume text",
+        )
+        assert "ICU Registered Nurse" in prompt
+        assert "resume_001" in prompt
+        assert "Some resume text" in prompt
 
 
 class TestLLMRerankerParsing:
@@ -72,3 +88,176 @@ class TestLLMRerankerParsing:
         """Test parsing an empty JSON array."""
         results = LLMReranker._parse_response("[]")
         assert results == []
+
+    def test_parse_single_response_object(self):
+        """Test parsing a single candidate JSON object."""
+        json_str = (
+            '{"resume_id":"r1","status":"PASS",'
+            '"skill_overlaps":["X"],"missing_criteria":[],'
+            '"reasoning":"Good."}'
+        )
+        result = LLMReranker._parse_single_response(json_str, "r1")
+        assert result.resume_id == "r1"
+        assert result.status == "PASS"
+        assert result.rank is None
+        assert result.skill_overlaps == ["X"]
+
+    def test_parse_single_response_array_fallback(self):
+        """Test that a one-element array is accepted by _parse_single_response."""
+        json_str = (
+            '[{"resume_id":"r1","status":"FAIL",'
+            '"skill_overlaps":[],"missing_criteria":["license"],'
+            '"reasoning":"Missing."}]'
+        )
+        result = LLMReranker._parse_single_response(json_str, "r1")
+        assert result.status == "FAIL"
+
+    def test_parse_single_response_invalid_json_raises(self):
+        """Test that invalid JSON raises ValueError."""
+        with pytest.raises(ValueError, match="not valid JSON"):
+            LLMReranker._parse_single_response("garbage", "r1")
+
+
+class TestLLMRerankerRuntime:
+    def _make_single_response(self, resume_id, status="PASS"):
+        """Helper to create a mock single-candidate LLM response."""
+        return MagicMock(
+            text=(
+                f'{{"resume_id":"{resume_id}","status":"{status}",'
+                f'"skill_overlaps":["nursing"],"missing_criteria":[],'
+                f'"reasoning":"Evaluated."}}'
+            )
+        )
+
+    def test_rerank_single_candidate_pass(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.return_value = self._make_single_response("r1", "PASS")
+
+        results = asyncio.run(reranker.rerank(
+            "Job text",
+            [{"resume_id": "r1", "text": "Resume text"}],
+        ))
+
+        assert len(results) == 1
+        assert results[0].resume_id == "r1"
+        assert results[0].status == "PASS"
+        assert results[0].rank == 1
+
+    def test_rerank_multiple_candidates_triggers_ranking(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        # First two calls: per-candidate evaluation (both PASS)
+        # Third call: ranking
+        reranker.llm.complete.side_effect = [
+            self._make_single_response("r1", "PASS"),
+            self._make_single_response("r2", "PASS"),
+            MagicMock(
+                text='[{"resume_id":"r1","rank":2},{"resume_id":"r2","rank":1}]'
+            ),
+        ]
+
+        results = asyncio.run(reranker.rerank(
+            "Job text",
+            [
+                {"resume_id": "r1", "text": "Resume 1"},
+                {"resume_id": "r2", "text": "Resume 2"},
+            ],
+        ))
+
+        passing = [r for r in results if r.status == "PASS"]
+        assert len(passing) == 2
+        assert passing[0].resume_id == "r2"
+        assert passing[0].rank == 1
+        assert passing[1].resume_id == "r1"
+        assert passing[1].rank == 2
+
+    def test_rerank_mixed_pass_fail(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.side_effect = [
+            self._make_single_response("r1", "PASS"),
+            MagicMock(
+                text=(
+                    '{"resume_id":"r2","status":"FAIL",'
+                    '"skill_overlaps":[],"missing_criteria":["license"],'
+                    '"reasoning":"Missing license."}'
+                )
+            ),
+        ]
+
+        results = asyncio.run(reranker.rerank(
+            "Job text",
+            [
+                {"resume_id": "r1", "text": "Resume 1"},
+                {"resume_id": "r2", "text": "Resume 2"},
+            ],
+        ))
+
+        assert len(results) == 2
+        assert results[0].status == "PASS"
+        assert results[0].rank == 1
+        assert results[1].status == "FAIL"
+
+    def test_rerank_retries_and_recovers_json(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.side_effect = [
+            # First call: malformed output
+            MagicMock(text="Output was malformed"),
+            # Repair call: valid JSON
+            MagicMock(
+                text=(
+                    '{"resume_id":"r1","status":"PASS",'
+                    '"skill_overlaps":[],"missing_criteria":[],"reasoning":"ok"}'
+                )
+            ),
+        ]
+
+        results = asyncio.run(reranker.rerank(
+            "Job text",
+            [{"resume_id": "r1", "text": "Resume text"}],
+        ))
+
+        assert len(results) == 1
+        assert results[0].resume_id == "r1"
+        assert reranker.llm.complete.call_count == 2
+
+    def test_rerank_empty_response_creates_fail(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.return_value = MagicMock(text="   ")
+
+        results = asyncio.run(reranker.rerank(
+            "Job text",
+            [{"resume_id": "r1", "text": "Resume text"}],
+        ))
+
+        # Exception is caught and turned into a FAIL result
+        assert len(results) == 1
+        assert results[0].status == "FAIL"
+        assert "evaluation_error" in results[0].missing_criteria
+
+    def test_rerank_ranking_failure_falls_back(self):
+        """When ranking call fails, candidates get insertion-order ranks."""
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.side_effect = [
+            self._make_single_response("r1", "PASS"),
+            self._make_single_response("r2", "PASS"),
+            # Ranking call fails with invalid JSON
+            MagicMock(text="not json"),
+        ]
+
+        results = asyncio.run(reranker.rerank(
+            "Job text",
+            [
+                {"resume_id": "r1", "text": "Resume 1"},
+                {"resume_id": "r2", "text": "Resume 2"},
+            ],
+        ))
+
+        passing = [r for r in results if r.status == "PASS"]
+        assert len(passing) == 2
+        assert passing[0].rank == 1
+        assert passing[1].rank == 2

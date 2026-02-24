@@ -62,6 +62,7 @@ Requirements:
 
 let currentTab = "ranked";
 let lastResult = null;
+let availableModels = [];
 
 // ── DOM helpers ────────────────────────────────────────────
 
@@ -77,6 +78,49 @@ function setStatus(text, type = "") {
 
 function hideStatus() {
     $("statusBar").style.display = "none";
+}
+
+// ── Model loading ────────────────────────────────────────
+
+function setModelOptions(models, defaultModel) {
+    const select = $("llmModel");
+    availableModels = models;
+
+    if (!models.length) {
+        select.innerHTML = `<option value="">No generative models</option>`;
+        select.disabled = true;
+        return;
+    }
+
+    select.innerHTML = models
+        .map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`)
+        .join("");
+
+    const preferredModel = models.includes(defaultModel) ? defaultModel : models[0];
+    select.value = preferredModel;
+    select.disabled = false;
+}
+
+async function loadModels() {
+    const select = $("llmModel");
+    select.disabled = true;
+    select.innerHTML = `<option value="">Loading…</option>`;
+
+    try {
+        const resp = await fetch("/models");
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        setModelOptions(data.models || [], data.default_model || "");
+    } catch (err) {
+        availableModels = [];
+        select.innerHTML = `<option value="">Unavailable</option>`;
+        select.disabled = true;
+        setStatus(`Model list unavailable: ${err.message}`, "error");
+    }
 }
 
 // ── Sample loading ─────────────────────────────────────────
@@ -147,7 +191,13 @@ async function runMatch() {
     }
 
     const topK = parseInt($("topK").value) || 5;
+    const llmModel = $("llmModel").value;
     const matchBtn = $("matchBtn");
+
+    if (!llmModel) {
+        setStatus("No Ollama model selected. Check /models and Ollama server status.", "error");
+        return;
+    }
 
     // Show loading
     matchBtn.disabled = true;
@@ -167,7 +217,11 @@ async function runMatch() {
         const resp = await fetch("/match", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ job_text: jobText, top_k: topK }),
+            body: JSON.stringify({
+                job_text: jobText,
+                top_k: topK,
+                llm_model: llmModel,
+            }),
         });
 
         if (!resp.ok) {
@@ -378,4 +432,8 @@ document.addEventListener("keydown", (e) => {
         e.preventDefault();
         runMatch();
     }
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+    loadModels();
 });

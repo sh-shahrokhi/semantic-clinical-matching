@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
 
 from llama_index.llms.ollama import Ollama
 
-from app.reranker.prompts import RECRUITER_SYSTEM_PROMPT, build_reranker_prompt
+from app.reranker.prompts import (
+    JSON_REPAIR_SYSTEM_PROMPT,
+    RANKING_SYSTEM_PROMPT,
+    SINGLE_CANDIDATE_SYSTEM_PROMPT,
+    build_json_repair_prompt,
+    build_ranking_prompt,
+    build_single_candidate_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +33,21 @@ class RankedCandidate:
     reasoning: str
 
 
+class LLMResponseError(ValueError):
+    """Raised when the model output is empty or cannot be parsed as valid JSON."""
+
+
 class LLMReranker:
     """Rerank and evaluate candidates using an LLM acting as a medical recruiter.
+
+    Evaluates each candidate individually (with async concurrency), then ranks
+    the PASSing candidates in a lightweight follow-up call.
 
     Args:
         llm_model: Name of the Ollama LLM model.
         ollama_base_url: Ollama server URL.
         request_timeout: Timeout for LLM requests in seconds.
+        max_concurrency: Maximum number of concurrent LLM evaluation calls.
     """
 
     def __init__(
@@ -39,41 +55,302 @@ class LLMReranker:
         llm_model: str = "llama3",
         ollama_base_url: str = "http://localhost:11434",
         request_timeout: float = 120.0,
+        max_concurrency: int = 3,
     ) -> None:
-        self.llm = Ollama(
-            model=llm_model,
-            base_url=ollama_base_url,
-            request_timeout=request_timeout,
+        self.default_model = llm_model
+        self.ollama_base_url = ollama_base_url
+        self.request_timeout = request_timeout
+        self.max_concurrency = max_concurrency
+        self.llm = self._build_client(llm_model)
+
+    def _build_client(self, model_name: str) -> Ollama:
+        """Create an Ollama client for a specific model."""
+        return Ollama(
+            model=model_name,
+            base_url=self.ollama_base_url,
+            request_timeout=self.request_timeout,
+            temperature=0.0,
         )
 
-    def rerank(
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def rerank(
         self,
         job_text: str,
         candidates: list[dict[str, str]],
+        llm_model: str | None = None,
     ) -> list[RankedCandidate]:
         """Evaluate and rank candidates against a job posting.
+
+        Each candidate is evaluated individually with capped concurrency,
+        then PASSing candidates are ranked in a follow-up call.
 
         Args:
             job_text: Full job posting text.
             candidates: List of dicts with ``resume_id`` and ``text`` keys.
+            llm_model: Optional model override for this request.
 
         Returns:
             List of RankedCandidate objects, PASS first (ranked), then FAIL.
         """
-        user_prompt = build_reranker_prompt(job_text, candidates)
-
-        response = self.llm.complete(
-            prompt=user_prompt,
-            system_prompt=RECRUITER_SYSTEM_PROMPT,
+        model_name = llm_model or self.default_model
+        llm_client = (
+            self.llm
+            if model_name == self.default_model
+            else self._build_client(model_name)
         )
 
-        return self._parse_response(response.text)
+        sem = asyncio.Semaphore(self.max_concurrency)
+
+        async def _eval_with_limit(candidate: dict[str, str]) -> RankedCandidate:
+            async with sem:
+                return await asyncio.to_thread(
+                    self._evaluate_one, job_text, candidate, llm_client,
+                )
+
+        raw_results = await asyncio.gather(
+            *[_eval_with_limit(c) for c in candidates],
+            return_exceptions=True,
+        )
+
+        passing: list[RankedCandidate] = []
+        failing: list[RankedCandidate] = []
+
+        for i, result in enumerate(raw_results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Candidate %s evaluation failed: %s",
+                    candidates[i].get("resume_id", f"index-{i}"),
+                    result,
+                )
+                failing.append(
+                    RankedCandidate(
+                        resume_id=candidates[i].get("resume_id", f"unknown-{i}"),
+                        rank=None,
+                        status="FAIL",
+                        skill_overlaps=[],
+                        missing_criteria=["evaluation_error"],
+                        reasoning=f"LLM evaluation failed: {result}",
+                    )
+                )
+            elif result.status == "PASS":
+                passing.append(result)
+            else:
+                failing.append(result)
+
+        # Rank passing candidates
+        if len(passing) > 1:
+            passing = self._rank_passing(job_text, passing, llm_client)
+        elif len(passing) == 1:
+            passing[0].rank = 1
+
+        return passing + failing
+
+    # ------------------------------------------------------------------
+    # Per-candidate evaluation
+    # ------------------------------------------------------------------
+
+    def _evaluate_one(
+        self,
+        job_text: str,
+        candidate: dict[str, str],
+        llm_client: Ollama,
+    ) -> RankedCandidate:
+        """Evaluate a single candidate against the job posting.
+
+        Args:
+            job_text: Full job posting text.
+            candidate: Dict with ``resume_id`` and ``text`` keys.
+            llm_client: Ollama LLM client to use.
+
+        Returns:
+            A RankedCandidate with rank=None (ranking assigned later).
+        """
+        candidate_id = candidate["resume_id"]
+        prompt = build_single_candidate_prompt(
+            job_text, candidate_id, candidate["text"],
+        )
+
+        response = llm_client.complete(
+            prompt=prompt,
+            system_prompt=SINGLE_CANDIDATE_SYSTEM_PROMPT,
+        )
+
+        raw_text = response.text or ""
+        if not raw_text.strip():
+            raise LLMResponseError(
+                f"LLM returned an empty response for candidate {candidate_id}."
+            )
+
+        logger.debug(
+            "Raw LLM response for %s (len=%d):\n%s",
+            candidate_id, len(raw_text), raw_text[:500],
+        )
+
+        try:
+            return self._parse_single_response(raw_text, candidate_id)
+        except ValueError as first_error:
+            logger.warning(
+                "JSON parsing failed for %s; retrying with repair: %s",
+                candidate_id,
+                first_error,
+            )
+
+        repair_prompt = build_json_repair_prompt(raw_text)
+        repair_response = llm_client.complete(
+            prompt=repair_prompt,
+            system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
+        )
+        repaired_text = repair_response.text or ""
+        if not repaired_text.strip():
+            raise LLMResponseError(
+                f"LLM returned empty output after JSON repair for {candidate_id}."
+            )
+
+        try:
+            return self._parse_single_response(repaired_text, candidate_id)
+        except ValueError as repair_error:
+            raise LLMResponseError(
+                f"Invalid JSON after retry for {candidate_id}: {repair_error}"
+            ) from repair_error
+
+    # ------------------------------------------------------------------
+    # Ranking pass
+    # ------------------------------------------------------------------
+
+    def _rank_passing(
+        self,
+        job_text: str,
+        passing: list[RankedCandidate],
+        llm_client: Ollama,
+    ) -> list[RankedCandidate]:
+        """Assign ranks to PASSing candidates via a lightweight LLM call.
+
+        Falls back to original order on failure.
+        """
+        summaries = [
+            {
+                "resume_id": c.resume_id,
+                "skill_overlaps": c.skill_overlaps,
+                "reasoning": c.reasoning,
+            }
+            for c in passing
+        ]
+        prompt = build_ranking_prompt(job_text, summaries)
+
+        try:
+            response = llm_client.complete(
+                prompt=prompt,
+                system_prompt=RANKING_SYSTEM_PROMPT,
+            )
+            raw_text = response.text or ""
+            ranking = self._parse_ranking_response(raw_text)
+
+            rank_map = {item["resume_id"]: item["rank"] for item in ranking}
+            for candidate in passing:
+                candidate.rank = rank_map.get(candidate.resume_id)
+
+            # Sort by rank (None last)
+            passing.sort(key=lambda c: c.rank if c.rank is not None else 999)
+        except Exception as e:
+            logger.warning("Ranking call failed, using insertion order: %s", e)
+            for i, candidate in enumerate(passing, start=1):
+                candidate.rank = i
+
+        return passing
+
+    # ------------------------------------------------------------------
+    # Parsing helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_fences(text: str) -> str:
+        """Remove markdown code fences if present."""
+        text = text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            lines = [ln for ln in lines if not ln.strip().startswith("```")]
+            text = "\n".join(lines)
+        return text
+
+    @staticmethod
+    def _parse_single_response(
+        response_text: str, candidate_id: str,
+    ) -> RankedCandidate:
+        """Parse an LLM response containing a single JSON object.
+
+        Args:
+            response_text: Raw LLM output text.
+            candidate_id: Expected candidate ID (fallback).
+
+        Returns:
+            A RankedCandidate with rank=None.
+
+        Raises:
+            ValueError: If the response cannot be parsed as valid JSON.
+        """
+        text = LLMReranker._strip_fences(response_text)
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse LLM response as JSON: %s", e)
+            logger.debug("Raw response: %s", response_text)
+            raise ValueError(f"LLM response is not valid JSON: {e}") from e
+
+        if isinstance(data, list):
+            if len(data) == 0:
+                raise ValueError("LLM returned an empty JSON array")
+            data = data[0]
+
+        if not isinstance(data, dict):
+            raise ValueError("LLM response must be a JSON object")
+
+        status = data.get("status", "FAIL").upper()
+        skill_overlaps = data.get("skill_overlaps", [])
+        missing_criteria = data.get("missing_criteria", [])
+        reasoning = data.get("reasoning", "")
+
+        # Consistency check: override contradictory status
+        if status == "PASS" and missing_criteria and not skill_overlaps:
+            logger.warning(
+                "Candidate %s: LLM said PASS but has missing_criteria "
+                "and no skill_overlaps — overriding to FAIL",
+                candidate_id,
+            )
+            status = "FAIL"
+
+        return RankedCandidate(
+            resume_id=candidate_id,
+            rank=None,
+            status=status,
+            skill_overlaps=skill_overlaps,
+            missing_criteria=missing_criteria,
+            reasoning=reasoning,
+        )
+
+    @staticmethod
+    def _parse_ranking_response(response_text: str) -> list[dict]:
+        """Parse the ranking LLM response into a list of {resume_id, rank} dicts."""
+        text = LLMReranker._strip_fences(response_text)
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Ranking response is not valid JSON: {e}") from e
+
+        if not isinstance(data, list):
+            raise ValueError("Ranking response must be a JSON array")
+
+        return data
 
     @staticmethod
     def _parse_response(response_text: str) -> list[RankedCandidate]:
         """Parse the LLM JSON response into RankedCandidate objects.
 
-        Handles common LLM quirks like markdown fences around JSON.
+        Kept for backward compatibility with tests.
 
         Args:
             response_text: Raw LLM output text.
@@ -84,14 +361,7 @@ class LLMReranker:
         Raises:
             ValueError: If the response cannot be parsed as valid JSON.
         """
-        text = response_text.strip()
-
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first and last lines (fences)
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            text = "\n".join(lines)
+        text = LLMReranker._strip_fences(response_text)
 
         try:
             data = json.loads(text)
