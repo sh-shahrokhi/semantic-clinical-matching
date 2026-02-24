@@ -16,6 +16,7 @@ from app.reranker.prompts import (
     build_json_repair_prompt,
     build_ranking_prompt,
     build_single_candidate_prompt,
+    build_single_json_repair_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,48 +174,59 @@ class LLMReranker:
             job_text, candidate_id, candidate["text"],
         )
 
-        response = llm_client.complete(
-            prompt=prompt,
-            system_prompt=SINGLE_CANDIDATE_SYSTEM_PROMPT,
-        )
+        max_attempts = 2
+        last_error = None
 
-        raw_text = response.text or ""
-        if not raw_text.strip():
-            raise LLMResponseError(
-                f"LLM returned an empty response for candidate {candidate_id}."
-            )
+        for attempt in range(max_attempts):
+            try:
+                response = llm_client.complete(
+                    prompt=prompt,
+                    system_prompt=SINGLE_CANDIDATE_SYSTEM_PROMPT,
+                )
 
-        logger.debug(
-            "Raw LLM response for %s (len=%d):\n%s",
-            candidate_id, len(raw_text), raw_text[:500],
-        )
+                raw_text = response.text or ""
+                if not raw_text.strip():
+                    raise ValueError("LLM returned an empty response.")
 
-        try:
-            return self._parse_single_response(raw_text, candidate_id)
-        except ValueError as first_error:
-            logger.warning(
-                "JSON parsing failed for %s; retrying with repair: %s",
-                candidate_id,
-                first_error,
-            )
+                logger.debug(
+                    "Raw LLM response for %s (len=%d):\n%s",
+                    candidate_id, len(raw_text), raw_text[:500],
+                )
 
-        repair_prompt = build_json_repair_prompt(raw_text)
-        repair_response = llm_client.complete(
-            prompt=repair_prompt,
-            system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
-        )
-        repaired_text = repair_response.text or ""
-        if not repaired_text.strip():
-            raise LLMResponseError(
-                f"LLM returned empty output after JSON repair for {candidate_id}."
-            )
+                with open(f"/tmp/raw_llm_{candidate_id}.txt", "w") as f:
+                    f.write(raw_text)
 
-        try:
-            return self._parse_single_response(repaired_text, candidate_id)
-        except ValueError as repair_error:
-            raise LLMResponseError(
-                f"Invalid JSON after retry for {candidate_id}: {repair_error}"
-            ) from repair_error
+                try:
+                    result = self._parse_single_response(raw_text, candidate_id)
+                except ValueError as first_error:
+                    logger.warning(
+                        "JSON parsing failed for %s; retrying with repair: %s",
+                        candidate_id, first_error,
+                    )
+                    repair_prompt = build_single_json_repair_prompt(raw_text)
+                    repair_response = llm_client.complete(
+                        prompt=repair_prompt,
+                        system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
+                    )
+                    repaired_text = repair_response.text or ""
+                    if not repaired_text.strip():
+                        raise ValueError("LLM returned empty output after JSON repair.")
+                    
+                    result = self._parse_single_response(repaired_text, candidate_id)
+
+                # Validate for empty skeleton hallucination
+                if result.status == "FAIL" and not result.missing_criteria and not result.reasoning:
+                    raise ValueError("LLM returned an empty skeleton with no reasoning or missing criteria")
+                
+                return result
+
+            except ValueError as e:
+                last_error = e
+                logger.warning("Attempt %d for %s failed: %s", attempt + 1, candidate_id, e)
+
+        raise LLMResponseError(
+            f"Failed to get valid evaluation for {candidate_id} after {max_attempts} attempts. Last error: {last_error}"
+        ) from last_error
 
     # ------------------------------------------------------------------
     # Ranking pass
@@ -312,6 +324,14 @@ class LLMReranker:
         skill_overlaps = data.get("skill_overlaps", [])
         missing_criteria = data.get("missing_criteria", [])
         reasoning = data.get("reasoning", "")
+
+        # Strict PASS/FAIL enforcement
+        if status not in ("PASS", "FAIL"):
+            logger.warning(
+                "Candidate %s: LLM returned invalid status '%s' — defaulting to FAIL",
+                candidate_id, status,
+            )
+            status = "FAIL"
 
         # Consistency check: override contradictory status
         if status == "PASS" and missing_criteria and not skill_overlaps:

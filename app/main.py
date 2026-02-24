@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from pathlib import Path
 
 import httpx
@@ -213,3 +214,19 @@ async def match(request: MatchRequest) -> MatchResponse:
     except Exception as e:
         logger.exception("Error during matching")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/random-job")
+async def get_random_job():
+    """Returns a random job posting from the processed dataset."""
+    jobs_dir = Path("data/processed/jobs")
+    if not jobs_dir.exists():
+        raise HTTPException(status_code=404, detail="Jobs directory not found")
+    
+    job_files = list(jobs_dir.glob("*.txt"))
+    if not job_files:
+        raise HTTPException(status_code=404, detail="No job postings found")
+        
+    random_job_file = random.choice(job_files)
+    text = random_job_file.read_text(encoding="utf-8")
+    
+    return {"text": text}

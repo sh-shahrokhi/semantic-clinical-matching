@@ -132,6 +132,26 @@ function loadSample(key) {
     textarea.setSelectionRange(0, 0);
 }
 
+async function loadRandomJob() {
+    try {
+        setStatus("Fetching random job from dataset...", "loading");
+        const resp = await fetch("/random-job");
+        if (!resp.ok) {
+            throw new Error(`Server returned ${resp.status}`);
+        }
+        const data = await resp.json();
+
+        const textarea = $("jobText");
+        textarea.value = data.text;
+        textarea.focus();
+        textarea.setSelectionRange(0, 0);
+        setStatus("Random job loaded successfully.", "success");
+        setTimeout(() => $("statusBar").style.display = "none", 2000);
+    } catch (err) {
+        setStatus(`Failed to load random job: ${err.message}`, "error");
+    }
+}
+
 // ── Clear ──────────────────────────────────────────────────
 
 function clearAll() {

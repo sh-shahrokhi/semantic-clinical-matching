@@ -91,8 +91,29 @@ def build_reranker_prompt(job_text: str, candidates: list[dict[str, str]]) -> st
     )
 
 
+SINGLE_CANDIDATE_JSON_REPAIR_USER_PROMPT_TEMPLATE = """\
+Convert the following LLM output into a SINGLE valid JSON object with this exact schema:
+{{
+  "resume_id": "<candidate id>",
+  "status": "PASS" or "FAIL",
+  "skill_overlaps": ["skill1", "skill2"],
+  "missing_criteria": ["missing1", "missing2"],
+  "reasoning": "<brief explanation>"
+}}
+
+Extract the status, skills, missing criteria, and reasoning from the raw text. \
+Do not nest the object. Do not return an array.
+
+Raw output:
+{raw_text}
+"""
+
+def build_single_json_repair_prompt(raw_text: str) -> str:
+    """Build a repair prompt to coerce non-JSON output into single candidate JSON."""
+    return SINGLE_CANDIDATE_JSON_REPAIR_USER_PROMPT_TEMPLATE.format(raw_text=raw_text)
+
 def build_json_repair_prompt(raw_text: str) -> str:
-    """Build a repair prompt to coerce non-JSON output into strict JSON."""
+    """Build a repair prompt to coerce non-JSON output into strict JSON array."""
     return JSON_REPAIR_USER_PROMPT_TEMPLATE.format(raw_text=raw_text)
 
 
