@@ -2,6 +2,7 @@
 data/raw/
 data/processed/
 data/faiss_index/
+data/demo_uk/
 
 # Python
 __pycache__/
