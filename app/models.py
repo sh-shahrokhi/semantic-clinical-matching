@@ -12,6 +12,13 @@ class MatchRequest(BaseModel):
 
     job_text: str = Field(..., description="Full text of the job posting to match against")
     top_k: int | None = Field(None, description="Number of candidates for Stage 1 retrieval")
+    market: str | None = Field(
+        None,
+        description=(
+            "Optional candidate market filter for Stage 1 retrieval. "
+            "Supported values: UK or US."
+        ),
+    )
     llm_model: str | None = Field(
         None,
         description=(

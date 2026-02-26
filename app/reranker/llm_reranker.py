@@ -12,8 +12,10 @@ from llama_index.llms.ollama import Ollama
 from app.reranker.prompts import (
     JSON_REPAIR_SYSTEM_PROMPT,
     RANKING_SYSTEM_PROMPT,
-    SINGLE_CANDIDATE_SYSTEM_PROMPT,
-    build_json_repair_prompt,
+    RANKING_SYSTEM_PROMPT_CLINICAL,
+    RANKING_SYSTEM_PROMPT_NONCLINICAL,
+    SINGLE_CANDIDATE_SYSTEM_PROMPT_CLINICAL,
+    SINGLE_CANDIDATE_SYSTEM_PROMPT_NONCLINICAL,
     build_ranking_prompt,
     build_single_candidate_prompt,
     build_single_json_repair_prompt,
@@ -77,6 +79,74 @@ class LLMReranker:
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _compose_prompt(system_prompt: str, user_prompt: str) -> str:
+        """Inline system guidance into the prompt for completion-style calls."""
+        return f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
+
+    @staticmethod
+    def _is_nonclinical_role(job_text: str) -> bool:
+        """Heuristic role detector for prompt routing."""
+        text = job_text.lower()
+
+        commercial_signals = (
+            "medical sales",
+            "sales representative",
+            "territory manager",
+            "account manager",
+            "business development",
+            "commercial role",
+            "pharmaceutical sales",
+        )
+        nonclinical_signals = (
+            "administrator",
+            "administrative",
+            "coordinator",
+            "operations",
+            "support assistant",
+            "intake specialist",
+            "customer service",
+            "office manager",
+            "program specialist",
+        )
+        clinical_care_signals = (
+            "registered nurse",
+            "rn",
+            "licensed practical nurse",
+            "physician",
+            "surgeon",
+            "midwife",
+            "icu",
+            "emergency room",
+            "bedside",
+            "patient care",
+            "clinical specialty",
+        )
+
+        has_commercial = any(token in text for token in commercial_signals)
+        has_nonclinical = any(token in text for token in nonclinical_signals)
+        has_clinical_care = any(token in text for token in clinical_care_signals)
+
+        if has_commercial:
+            return True
+        if has_nonclinical and not has_clinical_care:
+            return True
+        return False
+
+    @classmethod
+    def _select_single_candidate_system_prompt(cls, job_text: str) -> str:
+        """Choose per-candidate evaluation policy by job family."""
+        if cls._is_nonclinical_role(job_text):
+            return SINGLE_CANDIDATE_SYSTEM_PROMPT_NONCLINICAL
+        return SINGLE_CANDIDATE_SYSTEM_PROMPT_CLINICAL
+
+    @classmethod
+    def _select_ranking_system_prompt(cls, job_text: str) -> str:
+        """Choose ranking policy by job family."""
+        if cls._is_nonclinical_role(job_text):
+            return RANKING_SYSTEM_PROMPT_NONCLINICAL
+        return RANKING_SYSTEM_PROMPT_CLINICAL
+
     async def rerank(
         self,
         job_text: str,
@@ -102,13 +172,19 @@ class LLMReranker:
             if model_name == self.default_model
             else self._build_client(model_name)
         )
+        candidate_system_prompt = self._select_single_candidate_system_prompt(job_text)
+        ranking_system_prompt = self._select_ranking_system_prompt(job_text)
 
         sem = asyncio.Semaphore(self.max_concurrency)
 
         async def _eval_with_limit(candidate: dict[str, str]) -> RankedCandidate:
             async with sem:
                 return await asyncio.to_thread(
-                    self._evaluate_one, job_text, candidate, llm_client,
+                    self._evaluate_one,
+                    job_text,
+                    candidate,
+                    llm_client,
+                    candidate_system_prompt,
                 )
 
         raw_results = await asyncio.gather(
@@ -143,7 +219,9 @@ class LLMReranker:
 
         # Rank passing candidates
         if len(passing) > 1:
-            passing = self._rank_passing(job_text, passing, llm_client)
+            passing = self._rank_passing(
+                job_text, passing, llm_client, ranking_system_prompt,
+            )
         elif len(passing) == 1:
             passing[0].rank = 1
 
@@ -158,6 +236,7 @@ class LLMReranker:
         job_text: str,
         candidate: dict[str, str],
         llm_client: Ollama,
+        candidate_system_prompt: str,
     ) -> RankedCandidate:
         """Evaluate a single candidate against the job posting.
 
@@ -179,10 +258,10 @@ class LLMReranker:
 
         for attempt in range(max_attempts):
             try:
-                response = llm_client.complete(
-                    prompt=prompt,
-                    system_prompt=SINGLE_CANDIDATE_SYSTEM_PROMPT,
+                request_prompt = self._compose_prompt(
+                    candidate_system_prompt, prompt,
                 )
+                response = llm_client.complete(prompt=request_prompt)
 
                 raw_text = response.text or ""
                 if not raw_text.strip():
@@ -193,9 +272,6 @@ class LLMReranker:
                     candidate_id, len(raw_text), raw_text[:500],
                 )
 
-                with open(f"/tmp/raw_llm_{candidate_id}.txt", "w") as f:
-                    f.write(raw_text)
-
                 try:
                     result = self._parse_single_response(raw_text, candidate_id)
                 except ValueError as first_error:
@@ -204,20 +280,27 @@ class LLMReranker:
                         candidate_id, first_error,
                     )
                     repair_prompt = build_single_json_repair_prompt(raw_text)
-                    repair_response = llm_client.complete(
-                        prompt=repair_prompt,
-                        system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
+                    repair_request_prompt = self._compose_prompt(
+                        JSON_REPAIR_SYSTEM_PROMPT, repair_prompt,
                     )
+                    repair_response = llm_client.complete(prompt=repair_request_prompt)
                     repaired_text = repair_response.text or ""
                     if not repaired_text.strip():
                         raise ValueError("LLM returned empty output after JSON repair.")
-                    
+
                     result = self._parse_single_response(repaired_text, candidate_id)
 
                 # Validate for empty skeleton hallucination
-                if result.status == "FAIL" and not result.missing_criteria and not result.reasoning:
-                    raise ValueError("LLM returned an empty skeleton with no reasoning or missing criteria")
-                
+                if (
+                    result.status == "FAIL"
+                    and not result.missing_criteria
+                    and not result.reasoning
+                ):
+                    raise ValueError(
+                        "LLM returned an empty skeleton with no reasoning "
+                        "or missing criteria"
+                    )
+
                 return result
 
             except ValueError as e:
@@ -225,7 +308,8 @@ class LLMReranker:
                 logger.warning("Attempt %d for %s failed: %s", attempt + 1, candidate_id, e)
 
         raise LLMResponseError(
-            f"Failed to get valid evaluation for {candidate_id} after {max_attempts} attempts. Last error: {last_error}"
+            f"Failed to get valid evaluation for {candidate_id} "
+            f"after {max_attempts} attempts. Last error: {last_error}"
         ) from last_error
 
     # ------------------------------------------------------------------
@@ -237,6 +321,7 @@ class LLMReranker:
         job_text: str,
         passing: list[RankedCandidate],
         llm_client: Ollama,
+        ranking_system_prompt: str = RANKING_SYSTEM_PROMPT,
     ) -> list[RankedCandidate]:
         """Assign ranks to PASSing candidates via a lightweight LLM call.
 
@@ -253,10 +338,10 @@ class LLMReranker:
         prompt = build_ranking_prompt(job_text, summaries)
 
         try:
-            response = llm_client.complete(
-                prompt=prompt,
-                system_prompt=RANKING_SYSTEM_PROMPT,
+            ranking_prompt = self._compose_prompt(
+                ranking_system_prompt, prompt,
             )
+            response = llm_client.complete(prompt=ranking_prompt)
             raw_text = response.text or ""
             ranking = self._parse_ranking_response(raw_text)
 
@@ -279,13 +364,19 @@ class LLMReranker:
 
     @staticmethod
     def _strip_fences(text: str) -> str:
-        """Remove markdown code fences if present."""
+        """Remove markdown code fences and <think> tags if present."""
+        import re
+
+        # Remove <think>...</think> anywhere in the text
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         text = text.strip()
+
         if text.startswith("```"):
             lines = text.split("\n")
             lines = [ln for ln in lines if not ln.strip().startswith("```")]
             text = "\n".join(lines)
-        return text
+
+        return text.strip()
 
     @staticmethod
     def _parse_single_response(
@@ -320,10 +411,33 @@ class LLMReranker:
         if not isinstance(data, dict):
             raise ValueError("LLM response must be a JSON object")
 
-        status = data.get("status", "FAIL").upper()
-        skill_overlaps = data.get("skill_overlaps", [])
-        missing_criteria = data.get("missing_criteria", [])
-        reasoning = data.get("reasoning", "")
+        # Check for schema hallucinations
+        if "status" not in data and "reasoning" not in data:
+            raise ValueError("LLM returned valid JSON but with hallucinated schema keys.")
+
+        raw_status = data.get("status", "FAIL")
+        status = str(raw_status).upper().strip() if raw_status is not None else "FAIL"
+
+        def _normalize_str_list(value: object) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                text = value.strip()
+                return [text] if text else []
+            if isinstance(value, list | tuple | set):
+                normalized = [str(v).strip() for v in value]
+                return [v for v in normalized if v]
+            text = str(value).strip()
+            return [text] if text else []
+
+        skill_overlaps = _normalize_str_list(data.get("skill_overlaps", []))
+        missing_criteria = _normalize_str_list(data.get("missing_criteria", []))
+        reasoning_value = data.get("reasoning", "")
+        reasoning = (
+            reasoning_value.strip()
+            if isinstance(reasoning_value, str)
+            else str(reasoning_value).strip()
+        )
 
         # Strict PASS/FAIL enforcement
         if status not in ("PASS", "FAIL"):
@@ -334,10 +448,9 @@ class LLMReranker:
             status = "FAIL"
 
         # Consistency check: override contradictory status
-        if status == "PASS" and missing_criteria and not skill_overlaps:
+        if status == "PASS" and missing_criteria:
             logger.warning(
-                "Candidate %s: LLM said PASS but has missing_criteria "
-                "and no skill_overlaps — overriding to FAIL",
+                "Candidate %s: LLM said PASS but has missing_criteria — overriding to FAIL",
                 candidate_id,
             )
             status = "FAIL"

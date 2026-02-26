@@ -66,6 +66,31 @@ class TestFAISSRetriever:
         with pytest.raises(RuntimeError, match="Index not built"):
             retriever.query("ICU nurse")
 
+    def test_query_with_market_filter(self, mock_embeddings):
+        """Market filter should keep only candidates from the requested market."""
+        documents = [
+            Document(
+                text="Location: London, UK. NHS medical sales coordinator.",
+                metadata={"resume_id": "uk_001"},
+            ),
+            Document(
+                text="Location: Springfield, VA, USA. Medical support assistant.",
+                metadata={"resume_id": "us_001"},
+            ),
+        ]
+        retriever = FAISSRetriever()
+        mock_embed = MagicMock()
+        mock_embed.get_text_embedding_batch.return_value = mock_embeddings[:2]
+        mock_embed.get_text_embedding.return_value = mock_embeddings[0]
+        retriever.embed_model = mock_embed
+
+        retriever.build_index(documents)
+        results = retriever.query("Medical sales role in London", top_k=2, market="UK")
+
+        assert len(results) == 1
+        assert results[0].resume_id == "uk_001"
+        assert results[0].metadata.get("market") == "UK"
+
     def test_save_and_load_index(
         self, tmp_path, sample_documents, mock_embeddings,
     ):

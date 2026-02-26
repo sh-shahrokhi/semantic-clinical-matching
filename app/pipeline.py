@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -77,7 +76,11 @@ class MatchingPipeline:
         logger.info("FAISS index loaded from %s", self.settings.faiss_index_path)
 
     async def match(
-        self, job_text: str, top_k: int | None = None, llm_model: str | None = None
+        self,
+        job_text: str,
+        top_k: int | None = None,
+        llm_model: str | None = None,
+        market: str | None = None,
     ) -> PipelineResult:
         """Run the full two-stage matching pipeline.
 
@@ -85,6 +88,7 @@ class MatchingPipeline:
             job_text: Job posting text to match against.
             top_k: Number of candidates to retrieve in Stage 1. Defaults to settings value.
             llm_model: Optional model override for Stage 2 reranking.
+            market: Optional market filter (``UK`` or ``US``) for Stage 1 retrieval.
 
         Returns:
             PipelineResult with retrieval and ranking results.
@@ -105,7 +109,7 @@ class MatchingPipeline:
 
         # Stage 1: Retrieval
         logger.info("Stage 1: Retrieving top-%d candidates via FAISS", k)
-        retrieval_results = self.retriever.query(job_text, top_k=k)
+        retrieval_results = self.retriever.query(job_text, top_k=k, market=market)
         logger.info("Stage 1 complete: %d candidates retrieved", len(retrieval_results))
 
         # Stage 2: LLM Reranking

@@ -179,6 +179,7 @@ async def match(request: MatchRequest) -> MatchResponse:
             request.job_text,
             request.top_k,
             llm_model=request.llm_model,
+            market=request.market,
         )
 
         return MatchResponse(
@@ -221,12 +222,12 @@ async def get_random_job():
     jobs_dir = Path("data/processed/jobs")
     if not jobs_dir.exists():
         raise HTTPException(status_code=404, detail="Jobs directory not found")
-    
+
     job_files = list(jobs_dir.glob("*.txt"))
     if not job_files:
         raise HTTPException(status_code=404, detail="No job postings found")
-        
+
     random_job_file = random.choice(job_files)
     text = random_job_file.read_text(encoding="utf-8")
-    
+
     return {"text": text}

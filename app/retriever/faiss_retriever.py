@@ -45,6 +45,78 @@ class FAISSRetriever:
         self.index: faiss.IndexFlatIP | None = None
         self.documents: list[Document] = []
 
+    @staticmethod
+    def _normalize_market(market: str | None) -> str | None:
+        if market is None:
+            return None
+        normalized = market.strip().upper()
+        if normalized in {"UK", "US"}:
+            return normalized
+        return None
+
+    @staticmethod
+    def _infer_market_from_text(text: str) -> str:
+        low = f" {text.lower()} "
+
+        uk_tokens = (
+            " uk ",
+            " united kingdom ",
+            " nhs ",
+            " england ",
+            " scotland ",
+            " wales ",
+            " northern ireland ",
+            " london ",
+            " manchester ",
+            " birmingham ",
+            " glasgow ",
+            " oxford ",
+            " leeds ",
+            " bristol ",
+        )
+        us_tokens = (
+            " usa ",
+            " u.s.a ",
+            " united states ",
+            " washington, dc ",
+            ", va ",
+            ", md ",
+            ", tx ",
+            ", ca ",
+            ", ny ",
+            " fort belvoir ",
+            " virginia ",
+            " maryland ",
+            " california ",
+        )
+
+        uk_score = sum(token in low for token in uk_tokens)
+        us_score = sum(token in low for token in us_tokens)
+
+        if uk_score > us_score and uk_score > 0:
+            return "UK"
+        if us_score > uk_score and us_score > 0:
+            return "US"
+        return "UNKNOWN"
+
+    @classmethod
+    def _infer_document_market(cls, doc: Document) -> str:
+        metadata = doc.metadata or {}
+        for key in ("market", "country", "location", "region"):
+            value = metadata.get(key)
+            if isinstance(value, str):
+                normalized = cls._normalize_market(value)
+                if normalized is not None:
+                    return normalized
+                inferred = cls._infer_market_from_text(value)
+                if inferred != "UNKNOWN":
+                    return inferred
+
+        inferred = cls._infer_market_from_text(doc.text)
+        metadata["market"] = inferred
+        doc.metadata = metadata
+        return inferred
+
     def build_index(self, documents: list[Document]) -> None:
         """Embed all documents and build a FAISS inner-product index (cosine sim on L2-normed vecs).
 
@@ -65,12 +137,18 @@ class FAISSRetriever:
         self.index = faiss.IndexFlatIP(vectors.shape[1])
         self.index.add(vectors)
 
-    def query(self, job_text: str, top_k: int = 20) -> list[RetrievalResult]:
+    def query(
+        self,
+        job_text: str,
+        top_k: int = 20,
+        market: str | None = None,
+    ) -> list[RetrievalResult]:
         """Retrieve most similar resumes for a given job posting.
 
         Args:
             job_text: Job posting text to match against.
             top_k: Number of top candidates to return.
+            market: Optional market filter (``UK`` or ``US``).
 
         Returns:
             List of RetrievalResult ordered by descending similarity.
@@ -78,17 +156,28 @@ class FAISSRetriever:
         if self.index is None:
             raise RuntimeError("Index not built. Call build_index() first.")
 
+        requested_market = self._normalize_market(market)
+
         query_embedding = self.embed_model.get_text_embedding(job_text)
         query_vec = np.array([query_embedding], dtype=np.float32)
         faiss.normalize_L2(query_vec)
 
-        scores, indices = self.index.search(query_vec, min(top_k, len(self.documents)))
+        if requested_market is None:
+            search_k = min(top_k, len(self.documents))
+        else:
+            # Metadata filters are applied after vector search, so fetch all.
+            search_k = len(self.documents)
+
+        scores, indices = self.index.search(query_vec, search_k)
 
         results: list[RetrievalResult] = []
         for score, idx in zip(scores[0], indices[0]):
             if idx == -1:
                 continue
             doc = self.documents[idx]
+            doc_market = self._infer_document_market(doc)
+            if requested_market is not None and doc_market != requested_market:
+                continue
             results.append(
                 RetrievalResult(
                     resume_id=doc.metadata.get("resume_id", f"doc_{idx}"),
@@ -97,6 +186,8 @@ class FAISSRetriever:
                     metadata=doc.metadata,
                 )
             )
+            if len(results) >= top_k:
+                break
         return results
 
     def save_index(self, path: str | Path) -> None:

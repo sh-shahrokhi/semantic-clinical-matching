@@ -9,10 +9,14 @@ import pytest
 
 from app.reranker.llm_reranker import (
     LLMReranker,
-    LLMResponseError,
     RankedCandidate,
 )
-from app.reranker.prompts import build_reranker_prompt, build_single_candidate_prompt
+from app.reranker.prompts import (
+    SINGLE_CANDIDATE_SYSTEM_PROMPT,
+    SINGLE_CANDIDATE_SYSTEM_PROMPT_NONCLINICAL,
+    build_reranker_prompt,
+    build_single_candidate_prompt,
+)
 
 
 class TestPrompts:
@@ -117,6 +121,28 @@ class TestLLMRerankerParsing:
         with pytest.raises(ValueError, match="not valid JSON"):
             LLMReranker._parse_single_response("garbage", "r1")
 
+    def test_parse_single_response_pass_with_missing_criteria_becomes_fail(self):
+        """PASS status is overridden when required criteria are missing."""
+        json_str = (
+            '{"resume_id":"r1","status":"PASS",'
+            '"skill_overlaps":["nursing"],"missing_criteria":["license"],'
+            '"reasoning":"Missing required license."}'
+        )
+        result = LLMReranker._parse_single_response(json_str, "r1")
+        assert result.status == "FAIL"
+
+    def test_parse_single_response_normalizes_scalar_fields(self):
+        """Scalar/list-mismatched fields are normalized to expected types."""
+        json_str = (
+            '{"resume_id":"r1","status":"pass",'
+            '"skill_overlaps":"nursing","missing_criteria":"","reasoning":123}'
+        )
+        result = LLMReranker._parse_single_response(json_str, "r1")
+        assert result.status == "PASS"
+        assert result.skill_overlaps == ["nursing"]
+        assert result.missing_criteria == []
+        assert result.reasoning == "123"
+
 
 class TestLLMRerankerRuntime:
     def _make_single_response(self, resume_id, status="PASS"):
@@ -143,6 +169,55 @@ class TestLLMRerankerRuntime:
         assert results[0].resume_id == "r1"
         assert results[0].status == "PASS"
         assert results[0].rank == 1
+
+    def test_role_router_detects_nonclinical_sales_job(self):
+        job_text = (
+            "Medical Sales Representative role. "
+            "Territory account management and business development required."
+        )
+        assert LLMReranker._is_nonclinical_role(job_text) is True
+        assert (
+            LLMReranker._select_single_candidate_system_prompt(job_text)
+            == SINGLE_CANDIDATE_SYSTEM_PROMPT_NONCLINICAL
+        )
+
+    def test_role_router_keeps_clinical_policy_for_nursing_job(self):
+        job_text = (
+            "ICU Registered Nurse role. Active RN license and ACLS required. "
+            "3+ years bedside patient care experience."
+        )
+        assert LLMReranker._is_nonclinical_role(job_text) is False
+        assert (
+            LLMReranker._select_single_candidate_system_prompt(job_text)
+            == SINGLE_CANDIDATE_SYSTEM_PROMPT
+        )
+
+    def test_rerank_inlines_system_prompt_into_completion_prompt(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.return_value = self._make_single_response("r1", "PASS")
+
+        asyncio.run(reranker.rerank(
+            "Job text",
+            [{"resume_id": "r1", "text": "Resume text"}],
+        ))
+
+        kwargs = reranker.llm.complete.call_args.kwargs
+        assert "system_prompt" not in kwargs
+        assert SINGLE_CANDIDATE_SYSTEM_PROMPT.splitlines()[0] in kwargs["prompt"]
+
+    def test_rerank_uses_nonclinical_prompt_for_sales_job(self):
+        reranker = LLMReranker()
+        reranker.llm = MagicMock()
+        reranker.llm.complete.return_value = self._make_single_response("r1", "PASS")
+
+        asyncio.run(reranker.rerank(
+            "Medical Sales Representative role with territory account ownership.",
+            [{"resume_id": "r1", "text": "Resume text"}],
+        ))
+
+        kwargs = reranker.llm.complete.call_args.kwargs
+        assert SINGLE_CANDIDATE_SYSTEM_PROMPT_NONCLINICAL.splitlines()[0] in kwargs["prompt"]
 
     def test_rerank_multiple_candidates_triggers_ranking(self):
         reranker = LLMReranker()

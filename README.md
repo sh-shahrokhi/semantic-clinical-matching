@@ -110,6 +110,12 @@ Then run the data pipeline:
 python scripts/prepare_data.py --max-resumes 500 --max-jobs 200
 ```
 
+For a UK+UK weekend demo subset:
+
+```bash
+python scripts/build_demo_uk_dataset.py --max-jobs 200 --max-resumes 500
+```
+
 This will:
 - Join the 5 normalized resume CSVs by `person_id`
 - Filter to healthcare/clinical roles using keyword matching
@@ -158,7 +164,8 @@ Match a job posting against indexed resumes.
 ```json
 {
   "job_text": "Title: ICU Registered Nurse\nLocation: Calgary, Alberta\nRequirements:\n- Active CARNA registration\n- Minimum 2 years ICU experience\n- BLS and ACLS certification required",
-  "top_k": 10
+  "top_k": 10,
+  "market": "UK"
 }
 ```
 
@@ -214,6 +221,7 @@ semantic-clinical-matching/
 │   └── app.js                     # Frontend logic (API calls, rendering)
 ├── scripts/
 │   └── prepare_data.py            # Dataset extraction and cleaning pipeline
+│   └── build_demo_uk_dataset.py   # Build UK+UK weekend-demo subset + sample queries
 ├── tests/
 │   ├── conftest.py                # Shared fixtures (sample resumes, jobs, LLM output)
 │   ├── test_api.py                # API endpoint tests

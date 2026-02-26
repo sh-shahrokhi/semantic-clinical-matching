@@ -248,3 +248,30 @@ class TestMatchEndpoint:
         assert data["ranked_candidates"][0]["status"] == "FAIL"
         assert "evaluation_error" in data["ranked_candidates"][0]["missing_criteria"]
 
+    def test_match_with_market_filter_returns_empty_when_no_market_hits(
+        self, client, test_settings,
+    ):
+        mock_embeddings = [
+            np.random.default_rng(42).random(768).tolist(),
+        ]
+        query_embedding = np.random.default_rng(42).random(768).tolist()
+
+        pipeline = _get_pipeline()
+        mock_embed = MagicMock()
+        mock_embed.get_text_embedding_batch.return_value = mock_embeddings
+        mock_embed.get_text_embedding.return_value = query_embedding
+        pipeline.retriever.embed_model = mock_embed
+
+        client.post("/resumes/ingest")
+        resp = client.post(
+            "/match",
+            json={
+                "job_text": "Medical sales role in London, UK",
+                "market": "UK",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["retrieval_results"] == []
+        assert data["ranked_candidates"] == []
