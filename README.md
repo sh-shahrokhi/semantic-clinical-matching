@@ -1,321 +1,275 @@
-# 🏥 Semantic Clinical Matching
+# Semantic Clinical Matching
 
-A two-stage NLP pipeline that matches medical professionals to clinical job postings using **vector retrieval** and **LLM-powered recruiter analysis**.
+A FastAPI application for resume-to-job matching using a two-stage pipeline:
 
-> **Stage 1** — FAISS cosine-similarity search narrows 500+ resumes to the top-N candidates.
-> **Stage 2** — An LLM (via Ollama) acts as a strict medical recruiter, evaluating licensing, certifications, experience, and role fit — then returns structured, explainable rankings.
+1. semantic retrieval with FAISS + embeddings
+2. LLM-based recruiter evaluation with structured PASS/FAIL reasoning
 
----
+The project is optimized for local inference with Ollama and includes a UK-focused demo workflow.
+
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [UK Demo Workflow](#uk-demo-workflow)
+- [API](#api)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Current Scope](#current-scope)
+
+## Features
+
+- Two-stage matching pipeline (retrieval then reranking)
+- FAISS cosine-similarity search over resume embeddings
+- Structured LLM output per candidate:
+  - `status` (`PASS`/`FAIL`)
+  - `skill_overlaps`
+  - `missing_criteria`
+  - `reasoning`
+- Role-aware reranker policy:
+  - strict clinical evaluation for clinical-care jobs
+  - non-clinical policy for healthcare sales/admin/ops jobs
+- Optional market-aware retrieval filter (`UK`/`US`)
+- REST API + lightweight web UI
+- Test coverage for retriever, reranker, pipeline, and API
 
 ## Architecture
 
+```text
+FastAPI
+  ├─ POST /resumes/ingest
+  ├─ POST /match
+  ├─ GET  /models
+  ├─ GET  /health
+  └─ GET  /random-job
+
+MatchingPipeline
+  ├─ Stage 1: FAISSRetriever (Ollama embeddings)
+  └─ Stage 2: LLMReranker (Ollama LLM)
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     FastAPI REST API                        │
-│           /health    /resumes/ingest    /match              │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                  ┌──────▼──────┐
-                  │  Pipeline   │
-                  │ Orchestrator│
-                  └──┬──────┬───┘
-                     │      │
-          ┌──────────▼┐  ┌──▼──────────┐
-          │  Stage 1  │  │   Stage 2   │
-          │   FAISS   │  │ LLM Reranker│
-          │ Retriever │  │  (Ollama)   │
-          └─────┬─────┘  └──────┬──────┘
-                │               │
-       ┌────────▼────┐   ┌──────▼─────┐
-       │  nomic-     │   │   llama3   │
-       │  embed-text │   │  (strict   │
-       │  embeddings │   │  recruiter │
-       │  (Ollama)   │   │  prompt)   │
-       └─────────────┘   └────────────┘
-```
-
-### How it works
-
-1. **Ingest** — Resume `.txt` files are loaded, embedded with `nomic-embed-text` via Ollama, and stored in a FAISS inner-product index (L2-normalized = cosine similarity).
-2. **Match** — A job posting is embedded and searched against the index to retrieve the top-N candidates.
-3. **Rerank** — The top-N candidates are sent to an LLM with a strict medical-recruiter system prompt. The LLM evaluates each candidate on licensing, certifications, experience, and specialty alignment, then returns a structured JSON array of PASS/FAIL decisions with reasoning.
-
----
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Language | Python 3.11+ |
-| Frontend | Vanilla HTML / CSS / JS (dark glassmorphism theme) |
-| API Framework | FastAPI + Uvicorn |
-| Embeddings | LlamaIndex + Ollama (`nomic-embed-text`) |
-| Vector Search | FAISS (CPU) |
-| LLM Reranking | LlamaIndex + Ollama (`llama3`) |
-| Configuration | pydantic-settings |
-| Package Manager | uv |
-| Testing | pytest |
-| Linting | Ruff |
-
----
 
 ## Quick Start
 
-### Prerequisites
+### 1) Prerequisites
 
-- **Python 3.11+**
-- **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
-- **[Ollama](https://ollama.com/)** — local LLM inference server
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- [Ollama](https://ollama.com/)
 
-### 1. Install dependencies
+### 2) Install dependencies
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/sh-shahrokhi/semantic-clinical-matching.git
 cd semantic-clinical-matching
 uv sync --dev
 ```
 
-### 2. Pull Ollama models
+### 3) Pull required Ollama models
 
 ```bash
-ollama pull nomic-embed-text   # Embedding model (Stage 1)
-ollama pull llama3             # LLM for reranking (Stage 2)
+ollama pull nomic-embed-text
+ollama pull llama3
 ```
 
-### 3. Prepare the dataset
+You can use a different generation model at request time via `llm_model` in `/match`.
 
-The project uses two Kaggle datasets that should be extracted into `data/raw/`:
+### 4) Prepare data
 
-| Dataset | Source | Contents |
-|---------|--------|----------|
-| **54k Resume Dataset** | [suriyaganesh/54k-resume-dataset-structured](https://www.kaggle.com/datasets/suriyaganesh/54k-resume-dataset-structured) | 6 normalized CSVs (people, abilities, education, experience, skills) |
-| **eMedCareers** | [promptcloud/latest-job-postings-in-europe](https://www.kaggle.com/datasets/promptcloud/latest-job-postings-in-europe) | 40k+ healthcare job postings (XML) |
-
-```
-data/raw/
-├── 54k Resume dataset/
-│   ├── 01_people.csv
-│   ├── 02_abilities.csv
-│   ├── 03_education.csv
-│   ├── 04_experience.csv
-│   ├── 05_person_skills.csv
-│   └── 06_skills.csv
-└── eMedCareers/
-    └── emedcareers_...xml
-```
-
-Then run the data pipeline:
+Option A: build processed data from raw datasets
 
 ```bash
-python scripts/prepare_data.py --max-resumes 500 --max-jobs 200
+uv run python scripts/prepare_data.py --max-resumes 500 --max-jobs 200
 ```
 
-For a UK+UK weekend demo subset:
+Option B: build UK-focused demo subset from existing processed text
 
 ```bash
-python scripts/build_demo_uk_dataset.py --max-jobs 200 --max-resumes 500
+uv run python scripts/build_demo_uk_dataset.py --max-jobs 200 --max-resumes 500 --max-queries 10
 ```
 
-This will:
-- Join the 5 normalized resume CSVs by `person_id`
-- Filter to healthcare/clinical roles using keyword matching
-- Parse the eMedCareers XML for job postings
-- Output cleaned `.txt` files to `data/processed/resumes/` and `data/processed/jobs/`
-
-### 4. Start the server
+### 5) Start the API
 
 ```bash
 uv run uvicorn app.main:app --reload
 ```
 
-Open **http://localhost:8000** for the web UI. API docs at **http://localhost:8000/docs**.
+- API docs: `http://127.0.0.1:8000/docs`
+- UI: `http://127.0.0.1:8000`
 
----
+### 6) Ingest resumes and run matching
 
-## API Reference
+Ingest:
 
-### `GET /health`
-
-Health check.
-
-```json
-{ "status": "ok", "version": "0.1.0" }
+```bash
+curl -X POST "http://127.0.0.1:8000/resumes/ingest" \
+  -H "Content-Type: application/json" \
+  -d '{"resumes_dir":"data/processed/resumes"}'
 ```
 
-### `POST /resumes/ingest`
+Match:
 
-Embed and index resumes into the FAISS vector store.
-
-**Request body** (optional):
-```json
-{ "resumes_dir": "/custom/path/to/resumes" }
+```bash
+curl -X POST "http://127.0.0.1:8000/match" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_text":"ICU Registered Nurse role in Alberta. Active license, BLS, ACLS, and 3+ years ICU experience required.",
+    "top_k":5,
+    "market":"UK",
+    "llm_model":"llama3"
+  }'
 ```
 
-**Response:**
-```json
-{ "message": "Successfully ingested 500 resumes", "count": 500 }
+## UK Demo Workflow
+
+For a weekend demo with UK-focused filtering:
+
+1. Build UK subset:
+
+```bash
+uv run python scripts/build_demo_uk_dataset.py --max-jobs 200 --max-resumes 500 --max-queries 10
 ```
 
-### `POST /match`
+2. Ingest only UK demo resumes:
 
-Match a job posting against indexed resumes.
+```bash
+curl -X POST "http://127.0.0.1:8000/resumes/ingest" \
+  -H "Content-Type: application/json" \
+  -d '{"resumes_dir":"data/demo_uk/resumes"}'
+```
 
-**Request body:**
+3. Use one query from `data/demo_uk/demo_queries_uk.json` and call `/match` with:
+- `"market": "UK"`
+
+## API
+
+### Endpoint summary
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | service health |
+| `GET` | `/models` | list installed non-embedding Ollama models |
+| `POST` | `/resumes/ingest` | build/update FAISS index from resume text files |
+| `POST` | `/match` | run retrieval + LLM reranking |
+| `GET` | `/random-job` | return random processed job text |
+
+### `POST /match` request
+
 ```json
 {
-  "job_text": "Title: ICU Registered Nurse\nLocation: Calgary, Alberta\nRequirements:\n- Active CARNA registration\n- Minimum 2 years ICU experience\n- BLS and ACLS certification required",
+  "job_text": "...",
   "top_k": 10,
-  "market": "UK"
+  "market": "UK",
+  "llm_model": "llama3"
 }
 ```
 
-**Response:**
+- `top_k` optional, defaults to `SCM_TOP_K`
+- `market` optional, supported values: `UK`, `US`
+- `llm_model` optional model override for reranking stage
+
+### `POST /match` response shape
+
 ```json
 {
   "retrieval_results": [
-    { "resume_id": "resume_00042", "score": 0.87, "text": "..." }
+    {
+      "resume_id": "resume_00042",
+      "score": 0.87,
+      "text": "..."
+    }
   ],
   "ranked_candidates": [
     {
       "resume_id": "resume_00042",
       "rank": 1,
       "status": "PASS",
-      "skill_overlaps": ["ICU experience", "ACLS", "CARNA license"],
+      "skill_overlaps": ["..."],
       "missing_criteria": [],
-      "reasoning": "Candidate holds active CARNA registration, 6+ years ICU experience, and all required certifications."  // Provides audit-ready reporting for recruiter decisions
-    },
-    {
-      "resume_id": "resume_00105",
-      "rank": null,
-      "status": "FAIL",
-      "skill_overlaps": ["ACLS"],
-      "missing_criteria": ["CARNA registration", "ICU experience"],
-      "reasoning": "Candidate is a cardiologist in Ontario without CARNA registration or ICU nursing experience."
+      "reasoning": "..."
     }
   ]
 }
 ```
 
----
-
-## Project Structure
-
-```
-semantic-clinical-matching/
-├── app/
-│   ├── __init__.py
-│   ├── config.py                  # Settings via pydantic-settings (SCM_ env prefix)
-│   ├── main.py                    # FastAPI app, endpoints, static file serving
-│   ├── models.py                  # Pydantic request/response schemas
-│   ├── pipeline.py                # Two-stage orchestrator
-│   ├── ingestion/
-│   │   └── resume_loader.py       # Load .txt resumes → LlamaIndex Documents
-│   ├── retriever/
-│   │   └── faiss_retriever.py     # FAISS vector index (build, query, save, load)
-│   └── reranker/
-│       ├── llm_reranker.py        # LLM-based candidate evaluation
-│       └── prompts.py             # Medical recruiter system prompt
-├── static/
-│   ├── index.html                 # Web UI — single-page app
-│   ├── style.css                  # Dark healthcare theme (glassmorphism)
-│   └── app.js                     # Frontend logic (API calls, rendering)
-├── scripts/
-│   └── prepare_data.py            # Dataset extraction and cleaning pipeline
-│   └── build_demo_uk_dataset.py   # Build UK+UK weekend-demo subset + sample queries
-├── tests/
-│   ├── conftest.py                # Shared fixtures (sample resumes, jobs, LLM output)
-│   ├── test_api.py                # API endpoint tests
-│   ├── test_pipeline.py           # Integration tests
-│   ├── test_reranker.py           # Reranker/prompt unit tests
-│   └── test_retriever.py          # FAISS retriever unit tests
-├── data/
-│   ├── raw/                       # Extracted Kaggle datasets (gitignored)
-│   ├── processed/                 # Cleaned .txt files (gitignored)
-│   └── faiss_index/               # Persisted FAISS index (gitignored)
-├── pyproject.toml
-└── uv.lock
-```
-
----
-
 ## Configuration
 
-All settings are managed via environment variables with the `SCM_` prefix:
+All settings use the `SCM_` prefix.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `SCM_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `SCM_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
-| `SCM_LLM_MODEL` | `llama3` | LLM model for reranking |
-| `SCM_TOP_K` | `20` | Number of candidates for Stage 1 retrieval |
-| `SCM_EMBEDDING_DIMENSION` | `768` | Embedding vector dimension |
-| `SCM_RESUMES_DIR` | `data/processed/resumes` | Path to resume text files |
-| `SCM_JOBS_DIR` | `data/processed/jobs` | Path to job posting text files |
-| `SCM_FAISS_INDEX_PATH` | `data/faiss_index` | Path to persisted FAISS index |
-| `SCM_LLM_REQUEST_TIMEOUT` | `120.0` | LLM request timeout (seconds) |
-
----
+|---|---|---|
+| `SCM_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama base URL |
+| `SCM_EMBEDDING_MODEL` | `nomic-embed-text` | embedding model |
+| `SCM_LLM_MODEL` | `llama3` | default reranker model |
+| `SCM_TOP_K` | `20` | default retrieval cutoff |
+| `SCM_EMBEDDING_DIMENSION` | `768` | embedding size |
+| `SCM_RESUMES_DIR` | `data/processed/resumes` | default resume directory |
+| `SCM_JOBS_DIR` | `data/processed/jobs` | default jobs directory |
+| `SCM_FAISS_INDEX_PATH` | `data/faiss_index` | FAISS persistence path |
+| `SCM_LLM_REQUEST_TIMEOUT` | `120.0` | LLM timeout in seconds |
+| `SCM_LLM_MAX_CONCURRENCY` | `3` | max concurrent candidate evaluations |
 
 ## Development
 
-### Run tests
+Run tests:
 
 ```bash
-uv run pytest tests/ -v
+uv run pytest -q
 ```
 
-All Ollama calls are mocked in tests — **no live Ollama server is required** for the test suite.
-
-### Lint and format
+Run lint:
 
 ```bash
-uv run ruff check app/ tests/        # Check for issues
-uv run ruff check app/ tests/ --fix  # Auto-fix
-uv run ruff format app/ tests/       # Format code
+uv run ruff check app tests
 ```
 
-### Test coverage
+Notes:
+- tests mock model calls; live Ollama is not required for the test suite
+- API smoke tests against real models require Ollama running locally
 
-```bash
-uv run pytest tests/ -v --cov=app --cov-report=term-missing
+## Troubleshooting
+
+### `Failed to connect to Ollama`
+
+- Ensure Ollama is installed and running
+- Check `SCM_OLLAMA_BASE_URL`
+- Confirm required models are pulled
+
+### Empty retrieval results
+
+- Ensure `/resumes/ingest` succeeded
+- Confirm resume directory has `.txt` files
+- If using `market`, verify resume corpus includes that market
+
+### Reranker outputs mostly `FAIL`
+
+- Validate job/resume market alignment (e.g., UK jobs with UK resumes)
+- Use the role-appropriate corpus (clinical-care vs non-clinical healthcare)
+
+## Project Structure
+
+```text
+app/
+  main.py
+  config.py
+  models.py
+  pipeline.py
+  ingestion/
+  retriever/
+  reranker/
+scripts/
+  prepare_data.py
+  build_demo_uk_dataset.py
+static/
+tests/
 ```
 
----
+## Current Scope
 
-## How the Reranker Prompt Works
+This project is built for local/demo operation and iterative experimentation.
 
-The LLM receives a **strict medical recruiter** system prompt that enforces:
-
-1. **Licensing** — Candidate must hold a valid license in the correct jurisdiction
-2. **Required certifications** — All "required" certifications must be present
-3. **Minimum experience** — Must meet the minimum years in the specified clinical area
-4. **Role relevance** — Clinical specialty must align with the posted role
-
-Each candidate gets a structured evaluation:
-- `status`: **PASS** or **FAIL** on mandatory requirements
-- `skill_overlaps`: matched qualifications
-- `missing_criteria`: required items the candidate lacks
-- `reasoning`: one-paragraph explanation
-- `rank`: integer rank for PASS candidates (1 = best), `null` for FAIL
-
----
-
-## Web UI
-
-The built-in web interface is served at the root URL (`/`) and provides:
-
-- **Dark-mode healthcare theme** — glassmorphism cards with teal/blue gradient accents
-- **Split-panel layout** — job posting input (left) and results (right)
-- **Stage tabs** — toggle between Stage 2 ranked candidates and Stage 1 retrieval scores
-- **Candidate cards** — PASS/FAIL badges, skill overlap chips, missing criteria, expandable reasoning
-- **Pipeline stats** — retrieved / passed / failed counts at a glance
-- **Sample jobs** — pre-built ICU Nurse, Cardiologist, Pharmacist, and Physiotherapist postings
-- **Keyboard shortcut** — `Ctrl+Enter` to submit
-
-No build step required — plain HTML, CSS, and JS served directly by FastAPI.
-
----
-
-## License
-
-MIT
+- optimized for local Ollama inference
+- includes UK demo tools, but corpus quality controls are still heuristic
+- market filtering is metadata/text-inference based, not full geocoding
